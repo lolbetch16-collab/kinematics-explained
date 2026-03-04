@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Calculator, Play, BarChart3, Crosshair, Zap, BookOpen, Target, Atom } from 'lucide-react';
+import { Calculator, Play, BarChart3, Crosshair, Zap, BookOpen, Target, Atom, ArrowRight } from 'lucide-react';
 import type { TabId } from './TabNav';
 
 const fadeUp = {
@@ -7,11 +7,11 @@ const fadeUp = {
   visible: (i: number) => ({ opacity: 1, y: 0, transition: { delay: i * 0.1, duration: 0.5 } }),
 };
 
-const features = [
-  { icon: <Calculator size={28} />, title: 'Kinematic Calculator', desc: 'Solve physics problems using the four standard kinematic equations with step-by-step solutions.' },
-  { icon: <Play size={28} />, title: 'Real-time Animations', desc: 'Visualize horizontal, vertical, and projectile motion with interactive animations.' },
-  { icon: <BarChart3 size={28} />, title: 'Motion Graphs Explorer', desc: 'Understand position, velocity, and acceleration relationships through interactive graphs.' },
-  { icon: <Crosshair size={28} />, title: 'Object Motion Tracker', desc: 'Track real-world objects via camera and analyze motion with Kalman filtering.' },
+const features: { icon: React.ReactNode; title: string; desc: string; tab: TabId }[] = [
+  { icon: <Calculator size={28} />, title: 'Kinematic Calculator', desc: 'Solve physics problems using the four standard kinematic equations with step-by-step solutions.', tab: 'horizontal' },
+  { icon: <Play size={28} />, title: 'Real-time Animations', desc: 'Visualize horizontal, vertical, and projectile motion with interactive animations.', tab: 'horizontal' },
+  { icon: <BarChart3 size={28} />, title: 'Motion Graphs Explorer', desc: 'Understand position, velocity, and acceleration relationships through interactive graphs.', tab: 'graphs' },
+  { icon: <Crosshair size={28} />, title: 'Object Motion Tracker', desc: 'Track real-world objects via camera and analyze motion with Kalman filtering.', tab: 'tracker' },
 ];
 
 const equations = [
@@ -38,9 +38,9 @@ const concepts = [
 ];
 
 const team = [
-  { initials: 'HB', name: 'Harvey Bruno', role: 'Lead Developer', desc: 'Core kinematic calculations engine and real-time visualization systems.' },
-  { initials: 'RC', name: 'Rein Cabillo', role: 'Mathematics & UX', desc: 'Interface design and educational content for accessible physics learning.' },
-  { initials: 'RG', name: 'Roel Guevarra', role: 'Computer Vision Engineer', desc: 'Object tracking with TensorFlow.js and Kalman filtering implementation.' },
+  { initials: 'HB', name: 'Harvey Bruno', role: 'Lead Developer & Professional Tambay', desc: 'Responsible for the core kinematic calculations engine and real-time visualization systems. Background in computational physics and software engineering.' },
+  { initials: 'RC', name: 'Rein Cabillo', role: 'Mathematics Prodigy & Quant Developer', desc: 'Designed the intuitive interface and educational content. Focused on making complex physics concepts accessible to learners at all levels.' },
+  { initials: 'RG', name: 'Roel Guevarra', role: 'Computer Vision Engineer and Aspiring Electrical Engineer', desc: 'Developed the object tracking system with Kalman filtering. Specializes in real-time computer vision applications.' },
 ];
 
 interface HomePageProps {
@@ -58,6 +58,14 @@ export default function HomePage({ onNavigate }: HomePageProps) {
         style={{ background: 'var(--gradient-hero)' }}
       >
         <div className="relative z-10">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="inline-block mb-4 px-4 py-1.5 rounded-full text-xs font-semibold tracking-wider uppercase"
+            style={{ background: 'hsl(217, 91%, 50% / 0.2)', color: 'hsl(217, 91%, 80%)' }}
+          >
+            Interactive Physics Platform
+          </motion.div>
           <motion.h1
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -91,36 +99,39 @@ export default function HomePage({ onNavigate }: HomePageProps) {
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={() => onNavigate('horizontal')}
-            className="mt-6 px-8 py-3 rounded-lg font-semibold text-primary bg-card hover:bg-muted transition-colors"
+            className="mt-6 px-8 py-3 rounded-lg font-semibold bg-card text-primary hover:bg-muted transition-colors inline-flex items-center gap-2"
           >
-            Get Started →
+            Get Started <ArrowRight size={16} />
           </motion.button>
         </div>
-        {/* Decorative circles */}
         <div className="absolute -top-20 -right-20 w-60 h-60 rounded-full opacity-10" style={{ background: 'hsl(217, 91%, 60%)' }} />
         <div className="absolute -bottom-16 -left-16 w-48 h-48 rounded-full opacity-10" style={{ background: 'hsl(174, 72%, 46%)' }} />
       </motion.section>
 
-      {/* Features Grid */}
+      {/* Features Grid — CLICKABLE */}
       <section>
         <h2 className="text-2xl font-bold text-center mb-8">Platform Features</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {features.map((f, i) => (
-            <motion.div
+            <motion.button
               key={f.title}
               custom={i}
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={fadeUp}
-              className="kinema-section flex gap-4 hover:shadow-[var(--shadow-elevated)] hover:-translate-y-1 transition-all duration-300 border-l-4 border-primary"
+              onClick={() => onNavigate(f.tab)}
+              className="kinema-section flex gap-4 hover:shadow-[var(--shadow-elevated)] hover:-translate-y-1 transition-all duration-300 border-l-4 border-primary text-left group cursor-pointer"
             >
-              <div className="text-primary shrink-0 mt-1">{f.icon}</div>
-              <div>
-                <h3 className="font-semibold text-lg mb-1">{f.title}</h3>
+              <div className="text-primary shrink-0 mt-1 group-hover:scale-110 transition-transform">{f.icon}</div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-lg mb-1 group-hover:text-primary transition-colors">{f.title}</h3>
                 <p className="text-muted-foreground text-sm">{f.desc}</p>
+                <span className="inline-flex items-center gap-1 text-primary text-xs font-semibold mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  Open <ArrowRight size={12} />
+                </span>
               </div>
-            </motion.div>
+            </motion.button>
           ))}
         </div>
       </section>
@@ -287,13 +298,13 @@ export default function HomePage({ onNavigate }: HomePageProps) {
       >
         <h3 className="text-2xl font-bold mb-3" style={{ color: 'white' }}>Ready to Explore Physics?</h3>
         <p className="mb-6 opacity-80" style={{ color: 'hsl(220, 20%, 90%)' }}>
-          Use the navigation tabs above to access all features.
+          Click any feature card above or use the navigation tabs to get started.
         </p>
         <button
           onClick={() => onNavigate('horizontal')}
-          className="px-8 py-3 rounded-lg font-semibold bg-card text-primary hover:bg-muted transition-colors"
+          className="px-8 py-3 rounded-lg font-semibold bg-card text-primary hover:bg-muted transition-colors inline-flex items-center gap-2"
         >
-          Start Calculating →
+          Start Calculating <ArrowRight size={16} />
         </button>
       </motion.section>
     </div>
