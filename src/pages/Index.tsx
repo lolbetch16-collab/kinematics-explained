@@ -14,14 +14,17 @@ export default function Index() {
       <header className="text-center pt-8 pb-4 px-4">
         <button
           onClick={() => setActiveTab('home')}
-          className="inline-block group cursor-pointer transition-transform hover:scale-105"
+          className="inline-flex items-center gap-3 group cursor-pointer transition-transform hover:scale-105"
         >
-          <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">
-            K<span className="text-primary">.</span>I<span className="text-primary">.</span>N<span className="text-primary">.</span>E<span className="text-primary">.</span>M<span className="text-primary">.</span>A
-          </h1>
-          <p className="text-muted-foreground text-sm mt-1 group-hover:text-primary transition-colors">
-            Kalman Integrated Navigation for Experimental Motion Analysis
-          </p>
+          <img src="/physics-favicon.png" alt="KINEMA Logo" className="w-10 h-10 md:w-12 md:h-12" />
+          <div>
+            <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">
+              K<span className="text-primary">.</span>I<span className="text-primary">.</span>N<span className="text-primary">.</span>E<span className="text-primary">.</span>M<span className="text-primary">.</span>A
+            </h1>
+            <p className="text-muted-foreground text-sm mt-0.5 group-hover:text-primary transition-colors">
+              Kalman Integrated Navigation for Experimental Motion Analysis
+            </p>
+          </div>
         </button>
       </header>
 
