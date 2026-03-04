@@ -10,14 +10,19 @@ export default function Index() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
+      {/* Header — clickable to go home */}
       <header className="text-center pt-8 pb-4 px-4">
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">
-          K<span className="text-primary">.</span>I<span className="text-primary">.</span>N<span className="text-primary">.</span>E<span className="text-primary">.</span>M<span className="text-primary">.</span>A
-        </h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Kalman Integrated Navigation for Experimental Motion Analysis
-        </p>
+        <button
+          onClick={() => setActiveTab('home')}
+          className="inline-block group cursor-pointer transition-transform hover:scale-105"
+        >
+          <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">
+            K<span className="text-primary">.</span>I<span className="text-primary">.</span>N<span className="text-primary">.</span>E<span className="text-primary">.</span>M<span className="text-primary">.</span>A
+          </h1>
+          <p className="text-muted-foreground text-sm mt-1 group-hover:text-primary transition-colors">
+            Kalman Integrated Navigation for Experimental Motion Analysis
+          </p>
+        </button>
       </header>
 
       {/* Navigation */}

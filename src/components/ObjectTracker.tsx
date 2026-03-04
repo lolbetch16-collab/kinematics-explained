@@ -1,11 +1,70 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Camera, CameraOff } from 'lucide-react';
+import { Camera, CameraOff, Circle } from 'lucide-react';
 import { KalmanFilter } from '@/lib/kinematics';
+
+// Color-based object tracking — no TensorFlow needed
+function detectColorBlob(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  targetHue: number,
+  hueTolerance: number,
+  minSaturation: number,
+  minValue: number
+): { x: number; y: number; w: number; h: number } | null {
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+  let sumX = 0, sumY = 0, count = 0;
+  let minX = w, minY = h, maxX = 0, maxY = 0;
+
+  for (let y = 0; y < h; y += 2) {
+    for (let x = 0; x < w; x += 2) {
+      const i = (y * w + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const [hue, sat, val] = rgbToHsv(r, g, b);
+      const hueDiff = Math.abs(hue - targetHue);
+      const hueMatch = hueDiff < hueTolerance || hueDiff > 360 - hueTolerance;
+      if (hueMatch && sat > minSaturation && val > minValue) {
+        sumX += x; sumY += y; count++;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (count < 50) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+  const s = max === 0 ? 0 : d / max;
+  return [h, s, max];
+}
+
+const COLOR_PRESETS = [
+  { name: 'Red', hue: 0, color: '#ef4444' },
+  { name: 'Orange', hue: 30, color: '#f97316' },
+  { name: 'Yellow', hue: 55, color: '#eab308' },
+  { name: 'Green', hue: 120, color: '#22c55e' },
+  { name: 'Blue', hue: 220, color: '#3b82f6' },
+  { name: 'Purple', hue: 280, color: '#a855f7' },
+];
 
 export default function ObjectTracker() {
   const [running, setRunning] = useState(false);
-  const [status, setStatus] = useState('Waiting to start...');
+  const [status, setStatus] = useState('Choose a tracking color and start the camera.');
   const [cameraError, setCameraError] = useState('');
   const [sensitivity, setSensitivity] = useState(5);
   const [trackingSpeed, setTrackingSpeed] = useState(5);
@@ -20,6 +79,8 @@ export default function ObjectTracker() {
   const [results, setResults] = useState<string[]>([]);
   const [pixelsPerCm, setPixelsPerCm] = useState(0);
   const [calibStep, setCalibStep] = useState(0);
+  const [targetColor, setTargetColor] = useState(0); // hue
+  const [hueTolerance, setHueTolerance] = useState(25);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -27,7 +88,6 @@ export default function ObjectTracker() {
   const radarRef = useRef<HTMLCanvasElement>(null);
   const velGraphRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const modelRef = useRef<any>(null);
   const runningRef = useRef(false);
   const positionsRef = useRef<number[]>([]);
   const timesRef = useRef<number[]>([]);
@@ -44,8 +104,22 @@ export default function ObjectTracker() {
   const kalmanXRef = useRef(new KalmanFilter());
   const kalmanVRef = useRef(new KalmanFilter());
   const lastDetRef = useRef(0);
+  const targetColorRef = useRef(0);
+  const hueToleranceRef = useRef(25);
+  const sensitivityRef = useRef(5);
+  const smoothingFactorRef = useRef(10);
+  const historyLengthRef = useRef(30);
+  const pixelsPerCmRef = useRef(0);
 
-  const pxToCm = useCallback((px: number) => pixelsPerCm > 0 ? px / pixelsPerCm : 0, [pixelsPerCm]);
+  // Keep refs in sync
+  useEffect(() => { targetColorRef.current = targetColor; }, [targetColor]);
+  useEffect(() => { hueToleranceRef.current = hueTolerance; }, [hueTolerance]);
+  useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
+  useEffect(() => { smoothingFactorRef.current = smoothingFactor; }, [smoothingFactor]);
+  useEffect(() => { historyLengthRef.current = historyLength; }, [historyLength]);
+  useEffect(() => { pixelsPerCmRef.current = pixelsPerCm; }, [pixelsPerCm]);
+
+  const pxToCm = (px: number) => pixelsPerCmRef.current > 0 ? px / pixelsPerCmRef.current : px;
 
   const drawScanner = useCallback(() => {
     const canvas = scannerRef.current;
@@ -117,7 +191,7 @@ export default function ObjectTracker() {
     ctx.strokeStyle = 'hsl(217, 91%, 50%)'; ctx.lineWidth = 2; ctx.stroke();
   }, []);
 
-  const detectFrame = useCallback(async () => {
+  const detectFrame = useCallback(() => {
     if (!runningRef.current) return;
     drawScanner();
     drawRadar();
@@ -129,57 +203,60 @@ export default function ObjectTracker() {
     }
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    // Mirror draw
+
+    // Draw video (mirrored)
     ctx.save();
     ctx.scale(-1, 1);
     ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
     ctx.restore();
 
-    let predictions: any[] = [];
-    if (modelRef.current) {
-      try {
-        predictions = await modelRef.current.detect(video);
-        predictions = predictions.filter((p: any) => p.class !== 'person' && p.score >= 0.7);
-      } catch {}
-    }
+    // Color-based detection
+    const minSat = (11 - sensitivityRef.current) * 0.08;
+    const blob = detectColorBlob(ctx, canvas.width, canvas.height, targetColorRef.current, hueToleranceRef.current, minSat, 0.25);
 
     const now = performance.now();
-    if (predictions.length > 0) {
-      const obj = predictions[0];
-      const [x, , w, h2] = obj.bbox;
-      const mirX = canvas.width - (x + w);
-      const cY = obj.bbox[1] + h2 / 2;
+
+    if (blob && blob.w > 10 && blob.h > 10) {
+      const centerX = blob.x + blob.w / 2;
+      const centerY = blob.y + blob.h / 2;
+
+      // Draw bounding box
+      ctx.strokeStyle = startedRef.current ? 'hsl(217, 91%, 50%)' : 'hsl(145, 63%, 42%)';
+      ctx.lineWidth = startedRef.current ? 3 : 2;
+      ctx.strokeRect(blob.x, blob.y, blob.w, blob.h);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.font = '14px Space Grotesk, sans-serif';
+      ctx.fillText(startedRef.current ? '● Tracking' : '● Detected', blob.x, blob.y > 20 ? blob.y - 6 : blob.y + blob.h + 16);
 
       if (!selectedRef.current) {
-        if (mirX <= 100) {
+        // Auto-select after holding still near left edge for 1.5s
+        if (centerX <= 120) {
           if (!selectionStartRef.current) selectionStartRef.current = now;
-          else if (now - selectionStartRef.current >= 2000) {
+          else if (now - selectionStartRef.current >= 1500) {
             selectedRef.current = true;
             startedRef.current = true;
             setScannerActive(true); setRadarActive(true);
-            positionsRef.current = [mirX]; timesRef.current = [now];
+            positionsRef.current = [centerX]; timesRef.current = [now];
             velocitiesRef.current = [0]; accelerationsRef.current = [0];
-            smoothedPosRef.current = mirX;
-            startPosRef.current = mirX; startTimeRef.current = now;
+            smoothedPosRef.current = centerX;
+            startPosRef.current = centerX; startTimeRef.current = now;
             kalmanXRef.current.reset(); kalmanVRef.current.reset();
-            setStatus('Object selected! Move it inside the frame.');
+            setStatus('Object locked! Move it to track motion.');
           }
         } else {
           selectionStartRef.current = null;
-          setStatus('Bring object to the right edge to select...');
+          setStatus(`Object detected. Move it to the LEFT edge and hold for 1.5s to start tracking.`);
         }
-        ctx.strokeStyle = 'lime'; ctx.lineWidth = 2;
-        ctx.strokeRect(canvas.width - (x + w), obj.bbox[1], w, h2);
       } else if (startedRef.current) {
         const tSinceLast = now - lastDetRef.current;
         lastDetRef.current = now;
         if (tSinceLast >= 16) {
-          const kx = kalmanXRef.current.update(mirX, now);
-          const sf = smoothingFactor / 100;
+          const kx = kalmanXRef.current.update(centerX, now);
+          const sf = smoothingFactorRef.current / 100;
           smoothedPosRef.current = smoothedPosRef.current !== null ? smoothedPosRef.current * (1 - sf) + kx * sf : kx;
           positionsRef.current.push(smoothedPosRef.current);
           timesRef.current.push(now);
-          if (positionsRef.current.length > historyLength) {
+          if (positionsRef.current.length > historyLengthRef.current) {
             positionsRef.current.shift(); timesRef.current.shift();
             if (velocitiesRef.current.length > 0) velocitiesRef.current.shift();
             if (accelerationsRef.current.length > 0) accelerationsRef.current.shift();
@@ -199,21 +276,18 @@ export default function ObjectTracker() {
             }
           }
         }
-        ctx.strokeStyle = 'blue'; ctx.lineWidth = 3;
-        ctx.strokeRect(canvas.width - (x + w), obj.bbox[1], w, h2);
 
         const disp = pxToCm(smoothedPosRef.current! - startPosRef.current);
         const elapsed = (now - startTimeRef.current) / 1000;
         const curV = velocitiesRef.current.length > 0 ? velocitiesRef.current[velocitiesRef.current.length - 1] : 0;
         const curA = accelerationsRef.current.length > 0 ? accelerationsRef.current[accelerationsRef.current.length - 1] : 0;
-        setStatus(`Tracking...\nDisplacement: ${disp.toFixed(2)} cm\nVelocity: ${curV.toFixed(2)} cm/s\nAcceleration: ${curA.toFixed(2)} cm/s²\nDuration: ${elapsed.toFixed(2)} s`);
+        setStatus(`● Tracking Active\nDisplacement: ${disp.toFixed(2)} cm\nVelocity: ${curV.toFixed(2)} cm/s\nAcceleration: ${curA.toFixed(2)} cm/s²\nDuration: ${elapsed.toFixed(2)} s`);
       }
     } else {
       if (!selectedRef.current) {
         selectionStartRef.current = null;
-        setStatus('No object detected. Bring object to right edge...');
+        setStatus('No matching color detected. Hold a colored object in front of the camera.');
       } else if (startedRef.current) {
-        // Finalize
         startedRef.current = false; selectedRef.current = false;
         setScannerActive(false); setRadarActive(false);
         selectionStartRef.current = null;
@@ -222,14 +296,14 @@ export default function ObjectTracker() {
           const totalT = (timesRef.current[timesRef.current.length - 1] - timesRef.current[0]) / 1000;
           const maxV = Math.max(...velocitiesRef.current.map(Math.abs));
           const avgV = dispCm / totalT;
-          setStatus(`Analysis Complete!\nDisplacement: ${dispCm.toFixed(2)} cm\nDuration: ${totalT.toFixed(2)} s\nMax velocity: ${maxV.toFixed(2)} cm/s\nAvg velocity: ${Math.abs(avgV).toFixed(2)} cm/s`);
-          setResults(prev => [`Disp: ${dispCm.toFixed(1)}cm | Time: ${totalT.toFixed(1)}s | MaxV: ${maxV.toFixed(1)}cm/s`, ...prev].slice(0, 10));
+          setStatus(`✓ Analysis Complete\nDisplacement: ${dispCm.toFixed(2)} cm\nDuration: ${totalT.toFixed(2)} s\nMax velocity: ${maxV.toFixed(2)} cm/s\nAvg velocity: ${Math.abs(avgV).toFixed(2)} cm/s`);
+          setResults(prev => [`Δx: ${dispCm.toFixed(1)}cm | t: ${totalT.toFixed(1)}s | v_max: ${maxV.toFixed(1)}cm/s`, ...prev].slice(0, 10));
           drawVelGraph();
         }
       }
     }
     if (runningRef.current) requestAnimationFrame(detectFrame);
-  }, [drawScanner, drawRadar, drawVelGraph, historyLength, smoothingFactor, pxToCm]);
+  }, [drawScanner, drawRadar, drawVelGraph]);
 
   const toggle = async () => {
     if (!running) {
@@ -244,12 +318,7 @@ export default function ObjectTracker() {
           await new Promise<void>(r => { videoRef.current!.onloadedmetadata = () => { videoRef.current!.play(); r(); }; });
         }
         if (canvasRef.current) { canvasRef.current.width = 640; canvasRef.current.height = 480; }
-        if (!modelRef.current) {
-          setStatus('Loading AI model...');
-          const cocoSsd = await import('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd/+esm' as any);
-          modelRef.current = await cocoSsd.load();
-        }
-        setStatus('Ready. Bring object to right edge...');
+        setStatus('Camera ready. Hold a colored object in view.');
         selectedRef.current = false; startedRef.current = false;
         positionsRef.current = []; timesRef.current = []; velocitiesRef.current = []; accelerationsRef.current = [];
         detectFrame();
@@ -260,19 +329,19 @@ export default function ObjectTracker() {
     } else {
       setRunning(false); runningRef.current = false;
       if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-      setStatus('Stopped.');
+      setStatus('Camera stopped.');
       setScannerActive(false); setRadarActive(false);
     }
   };
 
-  const handleCalibStart = () => { setCalibStep(1); setStatus('Click "Set End" when object is at end position.'); };
+  const handleCalibStart = () => { setCalibStep(1); setStatus('Move object to end position, then click "Set End".'); };
   const handleCalibEnd = () => {
     if (calibStep !== 1) return;
     setCalibStep(2);
-    const dist = 640 / 2; // half canvas
+    const dist = 640 / 2;
     const ppc = dist / refLength;
     setPixelsPerCm(ppc);
-    setStatus(`Calibrated! 1 cm = ${ppc.toFixed(1)} px`);
+    setStatus(`✓ Calibrated: 1 cm ≈ ${ppc.toFixed(1)} px`);
   };
   const handleCalibReset = () => { setCalibStep(0); setPixelsPerCm(0); setStatus('Calibration reset.'); };
 
@@ -283,8 +352,30 @@ export default function ObjectTracker() {
       <div className="kinema-section">
         <h2 className="text-2xl font-bold mb-2">Object Motion Tracker</h2>
         <p className="text-muted-foreground text-sm mb-4">
-          Track real-world objects with your camera and analyze their motion using AI detection and Kalman filtering.
+          Track colored objects with your camera using real-time color detection and Kalman filtering. No AI model required — works instantly.
         </p>
+
+        {/* Color selector */}
+        <div className="mb-4">
+          <label className="kinema-label">Select Tracking Color</label>
+          <div className="flex flex-wrap gap-2 mt-1">
+            {COLOR_PRESETS.map((c) => (
+              <button
+                key={c.name}
+                onClick={() => setTargetColor(c.hue)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold border-2 transition-all ${
+                  targetColor === c.hue ? 'border-primary ring-2 ring-primary/30 scale-105' : 'border-border hover:border-muted-foreground'
+                }`}
+              >
+                <Circle size={14} fill={c.color} stroke={c.color} />
+                {c.name}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2">
+            <SliderControl label={`Hue Tolerance: ${hueTolerance}°`} value={hueTolerance} onChange={setHueTolerance} min={5} max={60} />
+          </div>
+        </div>
 
         <button onClick={toggle} className={`flex items-center justify-center gap-2 w-full py-3 rounded-lg font-semibold transition-all ${running ? 'bg-destructive text-destructive-foreground' : 'bg-primary text-primary-foreground'}`}>
           {running ? <><CameraOff size={16} /> Stop Camera</> : <><Camera size={16} /> Start Camera</>}
@@ -292,32 +383,37 @@ export default function ObjectTracker() {
 
         {cameraError && (
           <div className="mt-4 p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-sm">
-            <h4 className="font-semibold text-destructive mb-1">Camera Access Denied</h4>
+            <h4 className="font-semibold text-destructive mb-1">Camera Access Error</h4>
             <p className="text-muted-foreground">{cameraError}</p>
+            <ul className="text-muted-foreground text-xs mt-2 list-disc pl-4 space-y-1">
+              <li>Check browser permissions for camera access</li>
+              <li>Ensure no other app is using your camera</li>
+              <li>Try using HTTPS (camera requires secure context)</li>
+            </ul>
           </div>
         )}
 
         {/* Video & Canvas */}
         <div className="relative mt-4 mx-auto rounded-xl overflow-hidden bg-foreground/5 border border-border" style={{ maxWidth: 640, aspectRatio: '4/3' }}>
-          <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" style={{ display: running ? 'block' : 'none' }} />
+          <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" style={{ display: 'none' }} />
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
-          {!running && <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">Camera feed will appear here</div>}
+          {!running && <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm font-medium">Camera feed will appear here</div>}
         </div>
 
         {/* Scanner & Radar */}
         <div className="flex flex-col sm:flex-row gap-4 mt-4 justify-center">
           <div className="text-center">
-            <canvas ref={scannerRef} width={250} height={250} className="rounded-xl border border-border mx-auto" style={{ background: '#000' }} />
+            <canvas ref={scannerRef} width={250} height={250} className="rounded-xl border border-border mx-auto" style={{ background: '#001a00' }} />
             <div className="mt-2 flex items-center justify-center gap-2 text-sm">
-              <span className={`w-3 h-3 rounded-full ${scannerActive ? 'bg-secondary animate-pulse-glow' : 'bg-destructive'}`} />
-              <span>Scanner</span>
+              <span className={`w-3 h-3 rounded-full transition-all ${scannerActive ? 'bg-secondary animate-pulse-glow' : 'bg-destructive'}`} />
+              <span>Object Scanner</span>
             </div>
           </div>
           <div className="text-center">
-            <canvas ref={radarRef} width={250} height={250} className="rounded-xl border border-border mx-auto" style={{ background: '#000' }} />
+            <canvas ref={radarRef} width={250} height={250} className="rounded-xl border border-border mx-auto" style={{ background: '#001a00' }} />
             <div className="mt-2 flex items-center justify-center gap-2 text-sm">
-              <span className={`w-3 h-3 rounded-full ${radarActive ? 'bg-secondary animate-pulse-glow' : 'bg-destructive'}`} />
-              <span>Radar</span>
+              <span className={`w-3 h-3 rounded-full transition-all ${radarActive ? 'bg-secondary animate-pulse-glow' : 'bg-destructive'}`} />
+              <span>Tracking Radar</span>
             </div>
           </div>
         </div>
@@ -326,43 +422,47 @@ export default function ObjectTracker() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
           <div className="bg-muted/30 rounded-xl p-4 space-y-3">
             <h4 className="font-semibold text-sm">Tracking Controls</h4>
-            <SliderControl label="Scanner Sensitivity" value={sensitivity} onChange={setSensitivity} min={1} max={10} />
-            <SliderControl label="Tracking Speed" value={trackingSpeed} onChange={setTrackingSpeed} min={1} max={10} />
-            <SliderControl label="Radar Range" value={radarRange} onChange={setRadarRange} min={1} max={10} />
-            <SliderControl label="History Length" value={historyLength} onChange={setHistoryLength} min={10} max={100} />
+            <SliderControl label={`Scanner Sensitivity: ${sensitivity}/10`} value={sensitivity} onChange={setSensitivity} min={1} max={10} />
+            <SliderControl label={`Tracking Speed: ${trackingSpeed}/10`} value={trackingSpeed} onChange={setTrackingSpeed} min={1} max={10} />
+            <SliderControl label={`Radar Range: ${radarRange}/10`} value={radarRange} onChange={setRadarRange} min={1} max={10} />
+            <SliderControl label={`History Length: ${historyLength}`} value={historyLength} onChange={setHistoryLength} min={10} max={100} />
           </div>
           <div className="bg-muted/30 rounded-xl p-4 space-y-3">
-            <h4 className="font-semibold text-sm">Advanced (Kalman Filter)</h4>
-            <SliderControl label="Process Noise" value={kalmanPN} onChange={v => { setKalmanPN(v); kalmanXRef.current.processNoise = v / 100; kalmanVRef.current.processNoise = v / 100; }} min={1} max={20} />
-            <SliderControl label="Measurement Noise" value={kalmanMN} onChange={v => { setKalmanMN(v); kalmanXRef.current.measurementNoise = v / 100; kalmanVRef.current.measurementNoise = v / 100; }} min={1} max={20} />
-            <SliderControl label="Smoothing Factor" value={smoothingFactor} onChange={setSmoothingFactor} min={1} max={20} />
+            <h4 className="font-semibold text-sm">Kalman Filter Parameters</h4>
+            <SliderControl label={`Process Noise: ${(kalmanPN / 100).toFixed(2)}`} value={kalmanPN} onChange={v => { setKalmanPN(v); kalmanXRef.current.processNoise = v / 100; kalmanVRef.current.processNoise = v / 100; }} min={1} max={20} />
+            <SliderControl label={`Measurement Noise: ${(kalmanMN / 100).toFixed(2)}`} value={kalmanMN} onChange={v => { setKalmanMN(v); kalmanXRef.current.measurementNoise = v / 100; kalmanVRef.current.measurementNoise = v / 100; }} min={1} max={20} />
+            <SliderControl label={`Smoothing: ${(smoothingFactor / 100).toFixed(2)}`} value={smoothingFactor} onChange={setSmoothingFactor} min={1} max={20} />
           </div>
         </div>
 
         {/* Calibration */}
         <div className="bg-muted/30 rounded-xl p-4 mt-4 space-y-3">
-          <h4 className="font-semibold text-sm">Calibration</h4>
+          <h4 className="font-semibold text-sm">Distance Calibration</h4>
           <SliderControl label={`Reference Length: ${refLength.toFixed(1)} cm`} value={refLength} onChange={setRefLength} min={1} max={30} step={0.1} />
           <div className="flex gap-2">
-            <button onClick={handleCalibStart} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20">Set Start</button>
-            <button onClick={handleCalibEnd} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20">Set End</button>
-            <button onClick={handleCalibReset} className="px-4 py-2 text-xs rounded-lg bg-muted text-muted-foreground font-medium hover:bg-muted/80">Reset</button>
+            <button onClick={handleCalibStart} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20 transition-colors">Set Start</button>
+            <button onClick={handleCalibEnd} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20 transition-colors">Set End</button>
+            <button onClick={handleCalibReset} className="px-4 py-2 text-xs rounded-lg bg-muted text-muted-foreground font-medium hover:bg-muted/80 transition-colors">Reset</button>
           </div>
         </div>
 
         {/* Kalman Info */}
-        <div className="bg-primary/5 rounded-xl p-4 mt-4 border-l-4 border-primary">
-          <h4 className="font-semibold text-primary text-sm mb-2">About the Kalman Filter</h4>
-          <p className="text-sm text-muted-foreground mb-2">The Kalman filter improves tracking accuracy by combining motion model predictions with sensor measurements.</p>
-          <ul className="text-sm text-muted-foreground space-y-1 list-disc pl-4">
-            <li><strong>Process Noise:</strong> Trust in motion model (higher = more responsive)</li>
-            <li><strong>Measurement Noise:</strong> Trust in sensor (higher = smoother but laggier)</li>
-            <li><strong>Smoothing Factor:</strong> Additional smoothing on Kalman output</li>
+        <div className="bg-primary/5 rounded-xl p-5 mt-4 border-l-4 border-primary">
+          <h4 className="font-semibold text-primary text-sm mb-2">About the Kalman Filter Algorithm</h4>
+          <p className="text-sm text-muted-foreground mb-3">
+            The Kalman filter is an optimal recursive estimation algorithm. It combines noisy measurements with a predictive model to produce estimates that are more accurate than either alone.
+          </p>
+          <ul className="text-sm text-muted-foreground space-y-1.5 list-disc pl-4 mb-3">
+            <li><strong>Process Noise (Q):</strong> How much to trust our motion model — higher = more responsive to changes</li>
+            <li><strong>Measurement Noise (R):</strong> How much to trust sensor data — higher = smoother but more lag</li>
+            <li><strong>Kalman Gain (K):</strong> Optimal weighting between prediction and measurement</li>
           </ul>
-          <div className="mt-3 space-y-1">
-            <div className="formula-block text-xs">Prediction: x̂ₖ⁻ = Fₖ·x̂ₖ₋₁ + Bₖ·uₖ</div>
-            <div className="formula-block text-xs">Update: x̂ₖ = x̂ₖ⁻ + Kₖ·(zₖ - Hₖ·x̂ₖ⁻)</div>
-            <div className="formula-block text-xs">Kalman Gain: Kₖ = Pₖ⁻·Hₖᵀ·(Hₖ·Pₖ⁻·Hₖᵀ + Rₖ)⁻¹</div>
+          <div className="space-y-1.5">
+            <div className="formula-block text-xs">Predict: x̂ₖ⁻ = F·x̂ₖ₋₁ + B·uₖ</div>
+            <div className="formula-block text-xs">Predict Covariance: Pₖ⁻ = F·Pₖ₋₁·Fᵀ + Q</div>
+            <div className="formula-block text-xs">Kalman Gain: Kₖ = Pₖ⁻·Hᵀ·(H·Pₖ⁻·Hᵀ + R)⁻¹</div>
+            <div className="formula-block text-xs">Update: x̂ₖ = x̂ₖ⁻ + Kₖ·(zₖ − H·x̂ₖ⁻)</div>
+            <div className="formula-block text-xs">Update Covariance: Pₖ = (I − Kₖ·H)·Pₖ⁻</div>
           </div>
         </div>
 
@@ -373,8 +473,9 @@ export default function ObjectTracker() {
           <div className="bg-muted/30 rounded-lg p-4 text-sm font-mono whitespace-pre-line min-h-[80px]">{status}</div>
           {results.length > 0 && (
             <div className="mt-3 space-y-2">
+              <h5 className="text-xs font-semibold text-muted-foreground">History</h5>
               {results.map((r, i) => (
-                <div key={i} className="text-xs bg-muted/20 rounded-lg p-3 border border-border">{r}</div>
+                <div key={i} className="text-xs font-mono bg-muted/20 rounded-lg p-3 border border-border">{r}</div>
               ))}
             </div>
           )}
@@ -388,7 +489,7 @@ function SliderControl({ label, value, onChange, min, max, step = 1 }: { label: 
   return (
     <div>
       <label className="text-xs text-muted-foreground font-medium block mb-1">{label}</label>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} className="w-full" />
+      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} className="w-full accent-primary" />
     </div>
   );
 }
