@@ -311,10 +311,38 @@ export default function ObjectTracker() {
         }
 
         // Compute velocity & acceleration from sliding window regression
-        const windowSize = Math.max(8, Math.min(positionsRef.current.length, 15));
-        const { velocity: curV, acceleration: curA } = computeFromWindow(
-          positionsRef.current, timesRef.current, windowSize
+        // Use larger window when movement is slow for better noise rejection
+        const positions = positionsRef.current;
+        const times = timesRef.current;
+        const recentSpan = positions.length >= 5
+          ? Math.abs(positions[positions.length - 1] - positions[positions.length - 5])
+          : 0;
+        const isSlowMotion = recentSpan < 8; // less than 8px over recent samples
+        const windowSize = isSlowMotion
+          ? Math.max(12, Math.min(positions.length, 25))
+          : Math.max(8, Math.min(positions.length, 15));
+        const { velocity: rawV, acceleration: rawA } = computeFromWindow(
+          positions, times, windowSize
         );
+
+        // Dead-zone: if total displacement in window is tiny, suppress velocity
+        const winStart = Math.max(0, positions.length - windowSize);
+        const winDisp = Math.abs(positions[positions.length - 1] - positions[winStart]);
+        const winTime = (times[times.length - 1] - times[winStart]) / 1000;
+        const deadZoneThreshold = 3; // px — noise floor
+        let curV = rawV;
+        let curA = rawA;
+        if (winDisp < deadZoneThreshold && winTime > 0.15) {
+          // Object is essentially stationary — suppress noise
+          curV = 0;
+          curA = 0;
+        } else if (isSlowMotion) {
+          // Scale down velocity proportionally to how close we are to the dead zone
+          const scale = Math.min(1, (winDisp - deadZoneThreshold) / 10);
+          curV = rawV * Math.max(0, scale);
+          curA = rawA * Math.max(0, scale);
+        }
+
         // Store for graph/history
         velocitiesRef.current.push(curV);
         accelerationsRef.current.push(curA);
