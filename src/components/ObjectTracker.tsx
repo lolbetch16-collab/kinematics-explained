@@ -121,6 +121,49 @@ export default function ObjectTracker() {
 
   const pxToCm = (px: number) => pixelsPerCmRef.current > 0 ? px / pixelsPerCmRef.current : px;
 
+  // Compute velocity/acceleration from a sliding window using linear regression
+  const computeFromWindow = (positions: number[], times: number[], windowSize = 5) => {
+    const n = Math.min(windowSize, positions.length);
+    if (n < 3) return { velocity: 0, acceleration: 0 };
+    const ps = positions.slice(-n);
+    const ts = times.slice(-n);
+    // Convert times to seconds relative to first sample
+    const t0 = ts[0];
+    const tSec = ts.map(t => (t - t0) / 1000);
+    // Linear regression for velocity: position = v*t + b
+    let sumT = 0, sumP = 0, sumTP = 0, sumTT = 0;
+    for (let i = 0; i < n; i++) {
+      sumT += tSec[i]; sumP += ps[i]; sumTP += tSec[i] * ps[i]; sumTT += tSec[i] * tSec[i];
+    }
+    const denom = n * sumTT - sumT * sumT;
+    const velocity = denom !== 0 ? (n * sumTP - sumT * sumP) / denom : 0;
+    // Quadratic regression for acceleration: position = 0.5*a*t^2 + v0*t + x0
+    // Use finite differences on velocity estimates from first and second half
+    if (n >= 4) {
+      const half = Math.floor(n / 2);
+      const ps1 = ps.slice(0, half), ts1 = tSec.slice(0, half);
+      const ps2 = ps.slice(-half), ts2 = tSec.slice(-half);
+      const v1 = linearSlope(ps1, ts1);
+      const v2 = linearSlope(ps2, ts2);
+      const tMid1 = ts1[Math.floor(ts1.length / 2)];
+      const tMid2 = ts2[Math.floor(ts2.length / 2)];
+      const dt = tMid2 - tMid1;
+      const acceleration = dt > 0.01 ? (v2 - v1) / dt : 0;
+      return { velocity: pxToCm(velocity), acceleration: pxToCm(acceleration) };
+    }
+    return { velocity: pxToCm(velocity), acceleration: 0 };
+  };
+
+  const linearSlope = (vals: number[], times: number[]) => {
+    const n = vals.length;
+    let sumT = 0, sumV = 0, sumTV = 0, sumTT = 0;
+    for (let i = 0; i < n; i++) {
+      sumT += times[i]; sumV += vals[i]; sumTV += times[i] * vals[i]; sumTT += times[i] * times[i];
+    }
+    const denom = n * sumTT - sumT * sumT;
+    return denom !== 0 ? (n * sumTV - sumT * sumV) / denom : 0;
+  };
+
   const drawScanner = useCallback(() => {
     const canvas = scannerRef.current;
     if (!canvas) return;
