@@ -62,6 +62,20 @@ const COLOR_PRESETS = [
   { name: 'Purple', hue: 280, color: '#a855f7' },
 ];
 
+interface GateCrossing {
+  gateLineX: number;
+  time: number;
+  direction: 'left-to-right' | 'right-to-left';
+}
+
+interface TripResult {
+  displacement: number; // cm or px
+  duration: number; // seconds
+  velocity: number; // cm/s or px/s
+  direction: string;
+  timestamp: number;
+}
+
 export default function ObjectTracker() {
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState('Choose a tracking color and start the camera.');
@@ -78,9 +92,14 @@ export default function ObjectTracker() {
   const [radarActive, setRadarActive] = useState(false);
   const [results, setResults] = useState<string[]>([]);
   const [pixelsPerCm, setPixelsPerCm] = useState(0);
-  const [calibStep, setCalibStep] = useState(0);
-  const [targetColor, setTargetColor] = useState(0); // hue
+  const [targetColor, setTargetColor] = useState(0);
   const [hueTolerance, setHueTolerance] = useState(25);
+
+  // Gate line state
+  const [gateLineA, setGateLineA] = useState<number | null>(null); // x position of start line
+  const [gateLineB, setGateLineB] = useState<number | null>(null); // x position of end line
+  const [gateStatus, setGateStatus] = useState<'idle' | 'setting-start' | 'setting-end' | 'ready'>('idle');
+  const [tripResults, setTripResults] = useState<TripResult[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -111,6 +130,22 @@ export default function ObjectTracker() {
   const historyLengthRef = useRef(30);
   const pixelsPerCmRef = useRef(0);
 
+  // Gate refs for use inside animation loop
+  const gateLineARef = useRef<number | null>(null);
+  const gateLineBRef = useRef<number | null>(null);
+  const gateStatusRef = useRef<'idle' | 'setting-start' | 'setting-end' | 'ready'>('idle');
+  const gateCrossingARef = useRef<{ time: number; x: number } | null>(null);
+  const prevXRef = useRef<number | null>(null);
+  const gateDistancePxRef = useRef(0);
+  const refLengthRef = useRef(10);
+  const tripResultsRef = useRef<TripResult[]>([]);
+
+  // Instantaneous velocity tracking for real-time display between gates
+  const instantVelocityRef = useRef(0);
+  const instantAccelRef = useRef(0);
+  const prevInstantVelRef = useRef(0);
+  const prevInstantTimeRef = useRef(0);
+
   // Keep refs in sync
   useEffect(() => { targetColorRef.current = targetColor; }, [targetColor]);
   useEffect(() => { hueToleranceRef.current = hueTolerance; }, [hueTolerance]);
@@ -118,50 +153,99 @@ export default function ObjectTracker() {
   useEffect(() => { smoothingFactorRef.current = smoothingFactor; }, [smoothingFactor]);
   useEffect(() => { historyLengthRef.current = historyLength; }, [historyLength]);
   useEffect(() => { pixelsPerCmRef.current = pixelsPerCm; }, [pixelsPerCm]);
+  useEffect(() => { gateLineARef.current = gateLineA; }, [gateLineA]);
+  useEffect(() => { gateLineBRef.current = gateLineB; }, [gateLineB]);
+  useEffect(() => { gateStatusRef.current = gateStatus; }, [gateStatus]);
+  useEffect(() => { refLengthRef.current = refLength; }, [refLength]);
 
-  const pxToCm = (px: number) => pixelsPerCmRef.current > 0 ? px / pixelsPerCmRef.current : px;
-
-  // Compute velocity/acceleration from a sliding window using linear regression
-  const computeFromWindow = (positions: number[], times: number[], windowSize = 5) => {
-    const n = Math.min(windowSize, positions.length);
-    if (n < 3) return { velocity: 0, acceleration: 0 };
-    const ps = positions.slice(-n);
-    const ts = times.slice(-n);
-    // Convert times to seconds relative to first sample
-    const t0 = ts[0];
-    const tSec = ts.map(t => (t - t0) / 1000);
-    // Linear regression for velocity: position = v*t + b
-    let sumT = 0, sumP = 0, sumTP = 0, sumTT = 0;
-    for (let i = 0; i < n; i++) {
-      sumT += tSec[i]; sumP += ps[i]; sumTP += tSec[i] * ps[i]; sumTT += tSec[i] * tSec[i];
+  const pxToCm = (px: number) => {
+    if (gateDistancePxRef.current > 0 && refLengthRef.current > 0) {
+      return (px / gateDistancePxRef.current) * refLengthRef.current;
     }
-    const denom = n * sumTT - sumT * sumT;
-    const velocity = denom !== 0 ? (n * sumTP - sumT * sumP) / denom : 0;
-    // Quadratic regression for acceleration: position = 0.5*a*t^2 + v0*t + x0
-    // Use finite differences on velocity estimates from first and second half
-    if (n >= 4) {
-      const half = Math.floor(n / 2);
-      const ps1 = ps.slice(0, half), ts1 = tSec.slice(0, half);
-      const ps2 = ps.slice(-half), ts2 = tSec.slice(-half);
-      const v1 = linearSlope(ps1, ts1);
-      const v2 = linearSlope(ps2, ts2);
-      const tMid1 = ts1[Math.floor(ts1.length / 2)];
-      const tMid2 = ts2[Math.floor(ts2.length / 2)];
-      const dt = tMid2 - tMid1;
-      const acceleration = dt > 0.01 ? (v2 - v1) / dt : 0;
-      return { velocity: pxToCm(velocity), acceleration: pxToCm(acceleration) };
-    }
-    return { velocity: pxToCm(velocity), acceleration: 0 };
+    if (pixelsPerCmRef.current > 0) return px / pixelsPerCmRef.current;
+    return px;
   };
 
-  const linearSlope = (vals: number[], times: number[]) => {
-    const n = vals.length;
-    let sumT = 0, sumV = 0, sumTV = 0, sumTT = 0;
-    for (let i = 0; i < n; i++) {
-      sumT += times[i]; sumV += vals[i]; sumTV += times[i] * vals[i]; sumTT += times[i] * times[i];
+  const getUnit = () => {
+    if (gateDistancePxRef.current > 0 || pixelsPerCmRef.current > 0) return 'cm';
+    return 'px';
+  };
+
+  // Draw gate lines on canvas
+  const drawGateLines = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    const lineA = gateLineARef.current;
+    const lineB = gateLineBRef.current;
+
+    if (lineA !== null) {
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.strokeStyle = 'hsl(145, 80%, 50%)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(lineA, 0);
+      ctx.lineTo(lineA, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'hsl(145, 80%, 50%)';
+      ctx.font = 'bold 14px Space Grotesk, sans-serif';
+      ctx.fillText('START', lineA + 6, 24);
+      // Arrow
+      ctx.beginPath();
+      ctx.moveTo(lineA, h / 2 - 10);
+      ctx.lineTo(lineA + 12, h / 2);
+      ctx.lineTo(lineA, h / 2 + 10);
+      ctx.fillStyle = 'hsla(145, 80%, 50%, 0.5)';
+      ctx.fill();
+      ctx.restore();
     }
-    const denom = n * sumTT - sumT * sumT;
-    return denom !== 0 ? (n * sumTV - sumT * sumV) / denom : 0;
+
+    if (lineB !== null) {
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.strokeStyle = 'hsl(0, 80%, 55%)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(lineB, 0);
+      ctx.lineTo(lineB, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'hsl(0, 80%, 55%)';
+      ctx.font = 'bold 14px Space Grotesk, sans-serif';
+      ctx.fillText('END', lineB + 6, 24);
+      // Arrow
+      ctx.beginPath();
+      ctx.moveTo(lineB, h / 2 - 10);
+      ctx.lineTo(lineB - 12, h / 2);
+      ctx.lineTo(lineB, h / 2 + 10);
+      ctx.fillStyle = 'hsla(0, 80%, 55%, 0.5)';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Draw distance indicator between lines
+    if (lineA !== null && lineB !== null) {
+      const midY = h - 30;
+      ctx.save();
+      ctx.strokeStyle = 'hsla(45, 90%, 60%, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(lineA, midY);
+      ctx.lineTo(lineB, midY);
+      ctx.stroke();
+      // End caps
+      ctx.beginPath();
+      ctx.moveTo(lineA, midY - 8); ctx.lineTo(lineA, midY + 8); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(lineB, midY - 8); ctx.lineTo(lineB, midY + 8); ctx.stroke();
+      // Label
+      const dist = pxToCm(Math.abs(lineB - lineA));
+      const unit = getUnit();
+      ctx.fillStyle = 'hsl(45, 90%, 60%)';
+      ctx.font = 'bold 13px Space Grotesk, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${dist.toFixed(1)} ${unit}`, (lineA + lineB) / 2, midY - 10);
+      ctx.restore();
+    }
   };
 
   const drawScanner = useCallback(() => {
@@ -259,6 +343,9 @@ export default function ObjectTracker() {
 
     const now = performance.now();
 
+    // Always draw gate lines
+    drawGateLines(ctx, canvas.width, canvas.height);
+
     if (blob && blob.w > 10 && blob.h > 10) {
       const centerX = blob.x + blob.w / 2;
       const centerY = blob.y + blob.h / 2;
@@ -271,8 +358,28 @@ export default function ObjectTracker() {
       ctx.font = '14px Space Grotesk, sans-serif';
       ctx.fillText(startedRef.current ? '● Tracking' : '● Detected', blob.x, blob.y > 20 ? blob.y - 6 : blob.y + blob.h + 16);
 
+      // If we're setting gate positions, capture object's current X
+      if (gateStatusRef.current === 'setting-start') {
+        gateLineARef.current = centerX;
+        setGateLineA(centerX);
+        gateStatusRef.current = 'idle';
+        setGateStatus('idle');
+        setStatus('Start line set! Now click "Set End" and move the object to the end position.');
+      } else if (gateStatusRef.current === 'setting-end') {
+        gateLineBRef.current = centerX;
+        setGateLineB(centerX);
+        gateStatusRef.current = 'ready';
+        setGateStatus('ready');
+        // Calculate gate distance
+        const distPx = Math.abs(centerX - (gateLineARef.current ?? 0));
+        gateDistancePxRef.current = distPx;
+        const distCm = (distPx / distPx) * refLengthRef.current; // = refLength
+        setPixelsPerCm(distPx / refLengthRef.current);
+        setStatus(`✓ Gates set! Distance: ${distCm.toFixed(1)} cm (${distPx.toFixed(0)} px)\nMove object across the gates to measure velocity.`);
+      }
+
       if (!selectedRef.current) {
-        // Auto-select after holding still near left edge for 1.5s
+        // Auto-select: hold near left edge for 1.5s
         if (centerX <= 120) {
           if (!selectionStartRef.current) selectionStartRef.current = now;
           else if (now - selectionStartRef.current >= 1500) {
@@ -283,8 +390,14 @@ export default function ObjectTracker() {
             velocitiesRef.current = [0]; accelerationsRef.current = [0];
             smoothedPosRef.current = centerX;
             startPosRef.current = centerX; startTimeRef.current = now;
+            prevXRef.current = centerX;
+            gateCrossingARef.current = null;
+            instantVelocityRef.current = 0;
+            instantAccelRef.current = 0;
+            prevInstantVelRef.current = 0;
+            prevInstantTimeRef.current = now;
             kalmanXRef.current.reset(); kalmanVRef.current.reset();
-            setStatus('Object locked! Move it to track motion.');
+            setStatus('Object locked! Move it across the gate lines to measure velocity.');
           }
         } else {
           selectionStartRef.current = null;
@@ -296,62 +409,199 @@ export default function ObjectTracker() {
         if (tSinceLast >= 16) {
           // Kalman-filtered position
           const kx = kalmanXRef.current.update(centerX, now);
-          // Exponential smoothing on filtered position
-          const sf = Math.max(0.3, smoothingFactorRef.current / 10); // 0.3–1.0 range
+          const sf = Math.max(0.3, smoothingFactorRef.current / 10);
           smoothedPosRef.current = smoothedPosRef.current !== null
             ? smoothedPosRef.current * (1 - sf) + kx * sf
             : kx;
           positionsRef.current.push(smoothedPosRef.current);
           timesRef.current.push(now);
-          // Trim history
           const maxHist = Math.max(historyLengthRef.current, 20);
           while (positionsRef.current.length > maxHist) {
             positionsRef.current.shift(); timesRef.current.shift();
           }
         }
 
-        // Compute velocity & acceleration from sliding window regression
-        // Use larger window when movement is slow for better noise rejection
-        const positions = positionsRef.current;
-        const times = timesRef.current;
-        const recentSpan = positions.length >= 5
-          ? Math.abs(positions[positions.length - 1] - positions[positions.length - 5])
-          : 0;
-        const isSlowMotion = recentSpan < 8; // less than 8px over recent samples
-        const windowSize = isSlowMotion
-          ? Math.max(12, Math.min(positions.length, 25))
-          : Math.max(8, Math.min(positions.length, 15));
-        const { velocity: rawV, acceleration: rawA } = computeFromWindow(
-          positions, times, windowSize
-        );
+        const currentX = smoothedPosRef.current!;
+        const prevX = prevXRef.current;
+        const lineA = gateLineARef.current;
+        const lineB = gateLineBRef.current;
 
-        // Dead-zone: if total displacement in window is tiny, suppress velocity
-        const winStart = Math.max(0, positions.length - windowSize);
-        const winDisp = Math.abs(positions[positions.length - 1] - positions[winStart]);
-        const winTime = (times[times.length - 1] - times[winStart]) / 1000;
-        const deadZoneThreshold = 3; // px — noise floor
-        let curV = rawV;
-        let curA = rawA;
-        if (winDisp < deadZoneThreshold && winTime > 0.15) {
-          // Object is essentially stationary — suppress noise
-          curV = 0;
-          curA = 0;
-        } else if (isSlowMotion) {
-          // Scale down velocity proportionally to how close we are to the dead zone
-          const scale = Math.min(1, (winDisp - deadZoneThreshold) / 10);
-          curV = rawV * Math.max(0, scale);
-          curA = rawA * Math.max(0, scale);
+        // === Gate-crossing detection ===
+        if (lineA !== null && lineB !== null && prevX !== null && gateStatusRef.current === 'ready') {
+          const leftGate = Math.min(lineA, lineB);
+          const rightGate = Math.max(lineA, lineB);
+
+          // Check if object crossed the start gate (gate A)
+          const crossedA = (prevX <= lineA && currentX > lineA) || (prevX >= lineA && currentX < lineA);
+          const crossedB = (prevX <= lineB && currentX > lineB) || (prevX >= lineB && currentX < lineB);
+
+          if (crossedA && !gateCrossingARef.current) {
+            // Object just crossed gate A — start timing
+            gateCrossingARef.current = { time: now, x: lineA };
+            setStatus('⏱ Object crossed START gate — timing...');
+          } else if (crossedB && gateCrossingARef.current) {
+            // Object crossed gate B — calculate trip
+            const tripTime = (now - gateCrossingARef.current.time) / 1000;
+            const distPx = Math.abs(lineB - lineA);
+            const distReal = pxToCm(distPx);
+            const velocity = tripTime > 0.001 ? distReal / tripTime : 0;
+            const direction = currentX > prevX ? '→' : '←';
+
+            // Calculate acceleration from velocity change
+            const prevVel = prevInstantVelRef.current;
+            const prevTime = prevInstantTimeRef.current;
+            const dt = (now - prevTime) / 1000;
+            const accel = dt > 0.05 ? (velocity - prevVel) / dt : 0;
+
+            instantVelocityRef.current = velocity;
+            instantAccelRef.current = accel;
+            prevInstantVelRef.current = velocity;
+            prevInstantTimeRef.current = now;
+
+            const unit = getUnit();
+            const trip: TripResult = {
+              displacement: distReal,
+              duration: tripTime,
+              velocity,
+              direction,
+              timestamp: now,
+            };
+
+            tripResultsRef.current = [trip, ...tripResultsRef.current].slice(0, 20);
+            setTripResults([...tripResultsRef.current]);
+
+            // Store for graph
+            velocitiesRef.current.push(velocity);
+            timesRef.current.push(now);
+            while (velocitiesRef.current.length > 100) velocitiesRef.current.shift();
+
+            // Classify speed
+            let speedLabel = '';
+            if (velocity < 5) speedLabel = '🐌 Very Slow';
+            else if (velocity < 20) speedLabel = '🚶 Slow';
+            else if (velocity < 60) speedLabel = '🏃 Medium';
+            else if (velocity < 150) speedLabel = '🚗 Fast';
+            else speedLabel = '🚀 Very Fast';
+
+            setStatus(
+              `✓ Gate Crossing Complete ${direction}\n` +
+              `Speed: ${speedLabel}\n` +
+              `Distance: ${distReal.toFixed(2)} ${unit}\n` +
+              `Time: ${tripTime.toFixed(3)} s\n` +
+              `Velocity: ${velocity.toFixed(2)} ${unit}/s\n` +
+              `Acceleration: ${accel.toFixed(2)} ${unit}/s²`
+            );
+
+            setResults(prev => [
+              `${direction} v: ${velocity.toFixed(1)} ${unit}/s | t: ${tripTime.toFixed(2)}s | Δx: ${distReal.toFixed(1)} ${unit} | ${speedLabel}`,
+              ...prev
+            ].slice(0, 10));
+
+            drawVelGraph();
+            gateCrossingARef.current = null;
+          }
+
+          // Also allow B→A crossings (reverse direction)
+          if (crossedB && !gateCrossingARef.current) {
+            gateCrossingARef.current = { time: now, x: lineB };
+            setStatus('⏱ Object crossed END gate — timing reverse...');
+          } else if (crossedA && gateCrossingARef.current && gateCrossingARef.current.x === lineB) {
+            const tripTime = (now - gateCrossingARef.current.time) / 1000;
+            const distPx = Math.abs(lineB - lineA);
+            const distReal = pxToCm(distPx);
+            const velocity = tripTime > 0.001 ? distReal / tripTime : 0;
+            const direction = '←';
+
+            const prevVel = prevInstantVelRef.current;
+            const prevTime = prevInstantTimeRef.current;
+            const dt = (now - prevTime) / 1000;
+            const accel = dt > 0.05 ? (velocity - prevVel) / dt : 0;
+
+            instantVelocityRef.current = velocity;
+            instantAccelRef.current = accel;
+            prevInstantVelRef.current = velocity;
+            prevInstantTimeRef.current = now;
+
+            const unit = getUnit();
+            const trip: TripResult = {
+              displacement: distReal,
+              duration: tripTime,
+              velocity,
+              direction,
+              timestamp: now,
+            };
+
+            tripResultsRef.current = [trip, ...tripResultsRef.current].slice(0, 20);
+            setTripResults([...tripResultsRef.current]);
+
+            velocitiesRef.current.push(velocity);
+            timesRef.current.push(now);
+
+            let speedLabel = '';
+            if (velocity < 5) speedLabel = '🐌 Very Slow';
+            else if (velocity < 20) speedLabel = '🚶 Slow';
+            else if (velocity < 60) speedLabel = '🏃 Medium';
+            else if (velocity < 150) speedLabel = '🚗 Fast';
+            else speedLabel = '🚀 Very Fast';
+
+            setStatus(
+              `✓ Gate Crossing Complete ${direction}\n` +
+              `Speed: ${speedLabel}\n` +
+              `Distance: ${distReal.toFixed(2)} ${unit}\n` +
+              `Time: ${tripTime.toFixed(3)} s\n` +
+              `Velocity: ${velocity.toFixed(2)} ${unit}/s\n` +
+              `Acceleration: ${accel.toFixed(2)} ${unit}/s²`
+            );
+
+            setResults(prev => [
+              `${direction} v: ${velocity.toFixed(1)} ${unit}/s | t: ${tripTime.toFixed(2)}s | Δx: ${distReal.toFixed(1)} ${unit} | ${speedLabel}`,
+              ...prev
+            ].slice(0, 10));
+
+            drawVelGraph();
+            gateCrossingARef.current = null;
+          }
         }
 
-        // Store for graph/history
-        velocitiesRef.current.push(curV);
-        accelerationsRef.current.push(curA);
-        while (velocitiesRef.current.length > 100) velocitiesRef.current.shift();
-        while (accelerationsRef.current.length > 100) accelerationsRef.current.shift();
+        // Real-time status when gates are not set or between crossings
+        if (gateStatusRef.current !== 'ready' || (!gateCrossingARef.current && tripResultsRef.current.length === 0)) {
+          const disp = pxToCm(currentX - startPosRef.current);
+          const elapsed = (now - startTimeRef.current) / 1000;
+          const unit = getUnit();
+          
+          // Simple velocity from recent positions
+          const positions = positionsRef.current;
+          const times = timesRef.current;
+          let simpleV = 0;
+          if (positions.length >= 3) {
+            const lookback = Math.min(10, positions.length);
+            const dt = (times[times.length - 1] - times[times.length - lookback]) / 1000;
+            const dx = positions[positions.length - 1] - positions[positions.length - lookback];
+            if (dt > 0.05) simpleV = pxToCm(dx) / dt;
+          }
 
-        const disp = pxToCm(smoothedPosRef.current! - startPosRef.current);
-        const elapsed = (now - startTimeRef.current) / 1000;
-        setStatus(`● Tracking Active\nDisplacement: ${disp.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm' : 'px'}\nVelocity: ${curV.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm/s' : 'px/s'}\nAcceleration: ${curA.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm/s²' : 'px/s²'}\nDuration: ${elapsed.toFixed(2)} s`);
+          if (gateStatusRef.current === 'ready') {
+            setStatus(
+              `● Tracking Active — Move object across gates\n` +
+              `Position: ${pxToCm(currentX).toFixed(1)} ${unit}\n` +
+              `Duration: ${elapsed.toFixed(1)} s`
+            );
+          } else {
+            setStatus(
+              `● Tracking Active (no gates set)\n` +
+              `Displacement: ${disp.toFixed(2)} ${unit}\n` +
+              `Velocity: ${simpleV.toFixed(2)} ${unit}/s\n` +
+              `Duration: ${elapsed.toFixed(1)} s\n` +
+              `Set gate lines for accurate measurement.`
+            );
+          }
+        } else if (gateCrossingARef.current) {
+          // Currently timing a crossing
+          const elapsed = (now - gateCrossingARef.current.time) / 1000;
+          setStatus(`⏱ Timing... ${elapsed.toFixed(2)}s\nMove object to the other gate line.`);
+        }
+
+        prevXRef.current = currentX;
       }
     } else {
       if (!selectedRef.current) {
@@ -361,15 +611,21 @@ export default function ObjectTracker() {
         startedRef.current = false; selectedRef.current = false;
         setScannerActive(false); setRadarActive(false);
         selectionStartRef.current = null;
-        if (positionsRef.current.length >= 2) {
-          const dispCm = pxToCm(positionsRef.current[positionsRef.current.length - 1] - positionsRef.current[0]);
-          const totalT = (timesRef.current[timesRef.current.length - 1] - timesRef.current[0]) / 1000;
-          const maxV = Math.max(...velocitiesRef.current.map(Math.abs));
-          const avgV = dispCm / totalT;
-          setStatus(`✓ Analysis Complete\nDisplacement: ${dispCm.toFixed(2)} cm\nDuration: ${totalT.toFixed(2)} s\nMax velocity: ${maxV.toFixed(2)} cm/s\nAvg velocity: ${Math.abs(avgV).toFixed(2)} cm/s`);
-          setResults(prev => [`Δx: ${dispCm.toFixed(1)}cm | t: ${totalT.toFixed(1)}s | v_max: ${maxV.toFixed(1)}cm/s`, ...prev].slice(0, 10));
-          drawVelGraph();
+        gateCrossingARef.current = null;
+        prevXRef.current = null;
+        if (tripResultsRef.current.length > 0) {
+          const last = tripResultsRef.current[0];
+          const unit = getUnit();
+          setStatus(
+            `✓ Tracking Lost\nLast measurement:\n` +
+            `  Velocity: ${last.velocity.toFixed(2)} ${unit}/s\n` +
+            `  Distance: ${last.displacement.toFixed(2)} ${unit}\n` +
+            `  Time: ${last.duration.toFixed(3)} s`
+          );
+        } else {
+          setStatus('Object lost. Hold in view to re-track.');
         }
+        drawVelGraph();
       }
     }
     if (runningRef.current) requestAnimationFrame(detectFrame);
@@ -391,6 +647,8 @@ export default function ObjectTracker() {
         setStatus('Camera ready. Hold a colored object in view.');
         selectedRef.current = false; startedRef.current = false;
         positionsRef.current = []; timesRef.current = []; velocitiesRef.current = []; accelerationsRef.current = [];
+        prevXRef.current = null;
+        gateCrossingARef.current = null;
         detectFrame();
       } catch (err: any) {
         setCameraError(err.message || 'Camera access denied');
@@ -404,16 +662,35 @@ export default function ObjectTracker() {
     }
   };
 
-  const handleCalibStart = () => { setCalibStep(1); setStatus('Move object to end position, then click "Set End".'); };
-  const handleCalibEnd = () => {
-    if (calibStep !== 1) return;
-    setCalibStep(2);
-    const dist = 640 / 2;
-    const ppc = dist / refLength;
-    setPixelsPerCm(ppc);
-    setStatus(`✓ Calibrated: 1 cm ≈ ${ppc.toFixed(1)} px`);
+  const handleSetStart = () => {
+    if (!running) { setStatus('Start the camera first!'); return; }
+    setGateStatus('setting-start');
+    gateStatusRef.current = 'setting-start';
+    setStatus('Hold your object at the START position. The line will be placed at the object\'s center.');
   };
-  const handleCalibReset = () => { setCalibStep(0); setPixelsPerCm(0); setStatus('Calibration reset.'); };
+
+  const handleSetEnd = () => {
+    if (!running) { setStatus('Start the camera first!'); return; }
+    if (gateLineA === null) { setStatus('Set the start line first!'); return; }
+    setGateStatus('setting-end');
+    gateStatusRef.current = 'setting-end';
+    setStatus('Move your object to the END position. The line will be placed at the object\'s center.');
+  };
+
+  const handleResetGates = () => {
+    setGateLineA(null);
+    setGateLineB(null);
+    setGateStatus('idle');
+    gateLineARef.current = null;
+    gateLineBRef.current = null;
+    gateStatusRef.current = 'idle';
+    gateDistancePxRef.current = 0;
+    gateCrossingARef.current = null;
+    setPixelsPerCm(0);
+    setTripResults([]);
+    tripResultsRef.current = [];
+    setStatus('Gates reset. Set new gate positions.');
+  };
 
   useEffect(() => { return () => { runningRef.current = false; if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); } }; }, []);
 
@@ -422,7 +699,8 @@ export default function ObjectTracker() {
       <div className="kinema-section">
         <h2 className="text-2xl font-bold mb-2">Object Motion Tracker</h2>
         <p className="text-muted-foreground text-sm mb-4">
-          Track colored objects with your camera using real-time color detection and Kalman filtering. No AI model required — works instantly.
+          Track colored objects using gate lines for precise velocity measurement.
+          Set two vertical reference lines, then move the object between them — the system accurately times the crossing for both fast and slow motion.
         </p>
 
         {/* Color selector */}
@@ -462,6 +740,51 @@ export default function ObjectTracker() {
             </ul>
           </div>
         )}
+
+        {/* Gate Lines Setup */}
+        <div className="bg-accent/20 rounded-xl p-4 mt-4 space-y-3 border border-accent/30">
+          <h4 className="font-semibold text-sm flex items-center gap-2">
+            📏 Gate Lines — Distance Calibration
+            {gateStatus === 'ready' && <span className="text-xs bg-secondary/20 text-secondary px-2 py-0.5 rounded-full">✓ Ready</span>}
+          </h4>
+          <p className="text-xs text-muted-foreground">
+            Place your object at the start position and click "Set Start", then move it to the end and click "Set End".
+            The system will draw two vertical reference lines and measure the time taken for the object to cross between them.
+          </p>
+          <SliderControl label={`Reference Distance: ${refLength.toFixed(1)} cm`} value={refLength} onChange={setRefLength} min={1} max={100} step={0.5} />
+          <div className="flex gap-2">
+            <button
+              onClick={handleSetStart}
+              className={`px-4 py-2 text-xs rounded-lg font-medium transition-colors ${
+                gateStatus === 'setting-start'
+                  ? 'bg-secondary text-secondary-foreground animate-pulse'
+                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+              }`}
+            >
+              {gateLineA !== null ? '✓ Start Set' : 'Set Start'}
+            </button>
+            <button
+              onClick={handleSetEnd}
+              className={`px-4 py-2 text-xs rounded-lg font-medium transition-colors ${
+                gateStatus === 'setting-end'
+                  ? 'bg-secondary text-secondary-foreground animate-pulse'
+                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+              }`}
+            >
+              {gateLineB !== null ? '✓ End Set' : 'Set End'}
+            </button>
+            <button onClick={handleResetGates} className="px-4 py-2 text-xs rounded-lg bg-muted text-muted-foreground font-medium hover:bg-muted/80 transition-colors">
+              Reset Gates
+            </button>
+          </div>
+          {gateLineA !== null && gateLineB !== null && (
+            <div className="text-xs text-muted-foreground bg-muted/30 rounded-lg p-2">
+              Gate distance: {Math.abs(gateLineB - gateLineA).toFixed(0)} px = {refLength.toFixed(1)} cm
+              <br />
+              Move your tracked object back and forth across the gates to measure velocity.
+            </div>
+          )}
+        </div>
 
         {/* Video & Canvas */}
         <div className="relative mt-4 mx-auto rounded-xl overflow-hidden bg-foreground/5 border border-border" style={{ maxWidth: 640, aspectRatio: '4/3' }}>
@@ -505,34 +828,63 @@ export default function ObjectTracker() {
           </div>
         </div>
 
-        {/* Calibration */}
-        <div className="bg-muted/30 rounded-xl p-4 mt-4 space-y-3">
-          <h4 className="font-semibold text-sm">Distance Calibration</h4>
-          <SliderControl label={`Reference Length: ${refLength.toFixed(1)} cm`} value={refLength} onChange={setRefLength} min={1} max={30} step={0.1} />
-          <div className="flex gap-2">
-            <button onClick={handleCalibStart} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20 transition-colors">Set Start</button>
-            <button onClick={handleCalibEnd} className="px-4 py-2 text-xs rounded-lg bg-primary/10 text-primary font-medium hover:bg-primary/20 transition-colors">Set End</button>
-            <button onClick={handleCalibReset} className="px-4 py-2 text-xs rounded-lg bg-muted text-muted-foreground font-medium hover:bg-muted/80 transition-colors">Reset</button>
+        {/* Trip Results Table */}
+        {tripResults.length > 0 && (
+          <div className="mt-4 bg-muted/30 rounded-xl p-4">
+            <h4 className="font-semibold text-sm mb-3">Gate Crossing History</h4>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 px-2 text-muted-foreground">#</th>
+                    <th className="text-left py-2 px-2 text-muted-foreground">Dir</th>
+                    <th className="text-right py-2 px-2 text-muted-foreground">Distance</th>
+                    <th className="text-right py-2 px-2 text-muted-foreground">Time</th>
+                    <th className="text-right py-2 px-2 text-muted-foreground">Velocity</th>
+                    <th className="text-left py-2 px-2 text-muted-foreground">Speed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tripResults.map((t, i) => {
+                    const unit = getUnit();
+                    let speedLabel = '';
+                    if (t.velocity < 5) speedLabel = '🐌 Very Slow';
+                    else if (t.velocity < 20) speedLabel = '🚶 Slow';
+                    else if (t.velocity < 60) speedLabel = '🏃 Medium';
+                    else if (t.velocity < 150) speedLabel = '🚗 Fast';
+                    else speedLabel = '🚀 Very Fast';
+                    return (
+                      <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
+                        <td className="py-2 px-2 font-mono">{tripResults.length - i}</td>
+                        <td className="py-2 px-2">{t.direction}</td>
+                        <td className="py-2 px-2 text-right font-mono">{t.displacement.toFixed(1)} {unit}</td>
+                        <td className="py-2 px-2 text-right font-mono">{t.duration.toFixed(3)}s</td>
+                        <td className="py-2 px-2 text-right font-mono font-bold">{t.velocity.toFixed(1)} {unit}/s</td>
+                        <td className="py-2 px-2">{speedLabel}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Kalman Info */}
         <div className="bg-primary/5 rounded-xl p-5 mt-4 border-l-4 border-primary">
-          <h4 className="font-semibold text-primary text-sm mb-2">About the Kalman Filter Algorithm</h4>
+          <h4 className="font-semibold text-primary text-sm mb-2">How Gate-Line Tracking Works</h4>
           <p className="text-sm text-muted-foreground mb-3">
-            The Kalman filter is an optimal recursive estimation algorithm. It combines noisy measurements with a predictive model to produce estimates that are more accurate than either alone.
+            Instead of estimating velocity frame-by-frame (which is noisy), the gate-line system measures the <strong>time taken</strong> for an object to travel a <strong>known distance</strong> between two reference lines.
           </p>
           <ul className="text-sm text-muted-foreground space-y-1.5 list-disc pl-4 mb-3">
-            <li><strong>Process Noise (Q):</strong> How much to trust our motion model — higher = more responsive to changes</li>
-            <li><strong>Measurement Noise (R):</strong> How much to trust sensor data — higher = smoother but more lag</li>
-            <li><strong>Kalman Gain (K):</strong> Optimal weighting between prediction and measurement</li>
+            <li><strong>Constant Distance:</strong> The distance between gates is fixed and calibrated in cm</li>
+            <li><strong>Time-Based:</strong> Slow objects take longer → lower velocity. Fast objects take less time → higher velocity</li>
+            <li><strong>No Noise Amplification:</strong> A single time measurement replaces hundreds of noisy frame-to-frame differences</li>
+            <li><strong>Bi-directional:</strong> Works in both directions — move the object back and forth</li>
           </ul>
           <div className="space-y-1.5">
-            <div className="formula-block text-xs">Predict: x̂ₖ⁻ = F·x̂ₖ₋₁ + B·uₖ</div>
-            <div className="formula-block text-xs">Predict Covariance: Pₖ⁻ = F·Pₖ₋₁·Fᵀ + Q</div>
-            <div className="formula-block text-xs">Kalman Gain: Kₖ = Pₖ⁻·Hᵀ·(H·Pₖ⁻·Hᵀ + R)⁻¹</div>
-            <div className="formula-block text-xs">Update: x̂ₖ = x̂ₖ⁻ + Kₖ·(zₖ − H·x̂ₖ⁻)</div>
-            <div className="formula-block text-xs">Update Covariance: Pₖ = (I − Kₖ·H)·Pₖ⁻</div>
+            <div className="formula-block text-xs">v = Δx / Δt (distance between gates / crossing time)</div>
+            <div className="formula-block text-xs">a = Δv / Δt (change in velocity between consecutive crossings)</div>
           </div>
         </div>
 
