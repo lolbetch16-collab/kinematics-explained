@@ -101,8 +101,8 @@ export default function ObjectTracker() {
   const selectionStartRef = useRef<number | null>(null);
   const scanAngleRef = useRef(0);
   const radarAngleRef = useRef(0);
-  const kalmanXRef = useRef(new KalmanFilter());
-  const kalmanVRef = useRef(new KalmanFilter());
+  const kalmanXRef = useRef(new KalmanFilter(0.5, 2));
+  const kalmanVRef = useRef(new KalmanFilter(1, 5));
   const lastDetRef = useRef(0);
   const targetColorRef = useRef(0);
   const hueToleranceRef = useRef(25);
