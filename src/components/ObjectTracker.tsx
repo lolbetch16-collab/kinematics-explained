@@ -101,8 +101,8 @@ export default function ObjectTracker() {
   const selectionStartRef = useRef<number | null>(null);
   const scanAngleRef = useRef(0);
   const radarAngleRef = useRef(0);
-  const kalmanXRef = useRef(new KalmanFilter());
-  const kalmanVRef = useRef(new KalmanFilter());
+  const kalmanXRef = useRef(new KalmanFilter(0.5, 2));
+  const kalmanVRef = useRef(new KalmanFilter(1, 5));
   const lastDetRef = useRef(0);
   const targetColorRef = useRef(0);
   const hueToleranceRef = useRef(25);
@@ -120,6 +120,49 @@ export default function ObjectTracker() {
   useEffect(() => { pixelsPerCmRef.current = pixelsPerCm; }, [pixelsPerCm]);
 
   const pxToCm = (px: number) => pixelsPerCmRef.current > 0 ? px / pixelsPerCmRef.current : px;
+
+  // Compute velocity/acceleration from a sliding window using linear regression
+  const computeFromWindow = (positions: number[], times: number[], windowSize = 5) => {
+    const n = Math.min(windowSize, positions.length);
+    if (n < 3) return { velocity: 0, acceleration: 0 };
+    const ps = positions.slice(-n);
+    const ts = times.slice(-n);
+    // Convert times to seconds relative to first sample
+    const t0 = ts[0];
+    const tSec = ts.map(t => (t - t0) / 1000);
+    // Linear regression for velocity: position = v*t + b
+    let sumT = 0, sumP = 0, sumTP = 0, sumTT = 0;
+    for (let i = 0; i < n; i++) {
+      sumT += tSec[i]; sumP += ps[i]; sumTP += tSec[i] * ps[i]; sumTT += tSec[i] * tSec[i];
+    }
+    const denom = n * sumTT - sumT * sumT;
+    const velocity = denom !== 0 ? (n * sumTP - sumT * sumP) / denom : 0;
+    // Quadratic regression for acceleration: position = 0.5*a*t^2 + v0*t + x0
+    // Use finite differences on velocity estimates from first and second half
+    if (n >= 4) {
+      const half = Math.floor(n / 2);
+      const ps1 = ps.slice(0, half), ts1 = tSec.slice(0, half);
+      const ps2 = ps.slice(-half), ts2 = tSec.slice(-half);
+      const v1 = linearSlope(ps1, ts1);
+      const v2 = linearSlope(ps2, ts2);
+      const tMid1 = ts1[Math.floor(ts1.length / 2)];
+      const tMid2 = ts2[Math.floor(ts2.length / 2)];
+      const dt = tMid2 - tMid1;
+      const acceleration = dt > 0.01 ? (v2 - v1) / dt : 0;
+      return { velocity: pxToCm(velocity), acceleration: pxToCm(acceleration) };
+    }
+    return { velocity: pxToCm(velocity), acceleration: 0 };
+  };
+
+  const linearSlope = (vals: number[], times: number[]) => {
+    const n = vals.length;
+    let sumT = 0, sumV = 0, sumTV = 0, sumTT = 0;
+    for (let i = 0; i < n; i++) {
+      sumT += times[i]; sumV += vals[i]; sumTV += times[i] * vals[i]; sumTT += times[i] * times[i];
+    }
+    const denom = n * sumTT - sumT * sumT;
+    return denom !== 0 ? (n * sumTV - sumT * sumV) / denom : 0;
+  };
 
   const drawScanner = useCallback(() => {
     const canvas = scannerRef.current;
@@ -251,37 +294,36 @@ export default function ObjectTracker() {
         const tSinceLast = now - lastDetRef.current;
         lastDetRef.current = now;
         if (tSinceLast >= 16) {
+          // Kalman-filtered position
           const kx = kalmanXRef.current.update(centerX, now);
-          const sf = smoothingFactorRef.current / 100;
-          smoothedPosRef.current = smoothedPosRef.current !== null ? smoothedPosRef.current * (1 - sf) + kx * sf : kx;
+          // Exponential smoothing on filtered position
+          const sf = Math.max(0.3, smoothingFactorRef.current / 10); // 0.3–1.0 range
+          smoothedPosRef.current = smoothedPosRef.current !== null
+            ? smoothedPosRef.current * (1 - sf) + kx * sf
+            : kx;
           positionsRef.current.push(smoothedPosRef.current);
           timesRef.current.push(now);
-          if (positionsRef.current.length > historyLengthRef.current) {
+          // Trim history
+          const maxHist = Math.max(historyLengthRef.current, 20);
+          while (positionsRef.current.length > maxHist) {
             positionsRef.current.shift(); timesRef.current.shift();
-            if (velocitiesRef.current.length > 0) velocitiesRef.current.shift();
-            if (accelerationsRef.current.length > 0) accelerationsRef.current.shift();
-          }
-          if (positionsRef.current.length >= 2) {
-            const len = positionsRef.current.length;
-            const dt = (timesRef.current[len - 1] - timesRef.current[len - 2]) / 1000;
-            if (dt > 0) {
-              const rawV = pxToCm(positionsRef.current[len - 1] - positionsRef.current[len - 2]) / dt;
-              const kv = kalmanVRef.current.update(rawV, now);
-              velocitiesRef.current.push(kv);
-              if (velocitiesRef.current.length >= 2) {
-                const vLen = velocitiesRef.current.length;
-                const acc = (velocitiesRef.current[vLen - 1] - velocitiesRef.current[vLen - 2]) / dt;
-                accelerationsRef.current.push(acc);
-              }
-            }
           }
         }
 
+        // Compute velocity & acceleration from sliding window regression
+        const windowSize = Math.max(8, Math.min(positionsRef.current.length, 15));
+        const { velocity: curV, acceleration: curA } = computeFromWindow(
+          positionsRef.current, timesRef.current, windowSize
+        );
+        // Store for graph/history
+        velocitiesRef.current.push(curV);
+        accelerationsRef.current.push(curA);
+        while (velocitiesRef.current.length > 100) velocitiesRef.current.shift();
+        while (accelerationsRef.current.length > 100) accelerationsRef.current.shift();
+
         const disp = pxToCm(smoothedPosRef.current! - startPosRef.current);
         const elapsed = (now - startTimeRef.current) / 1000;
-        const curV = velocitiesRef.current.length > 0 ? velocitiesRef.current[velocitiesRef.current.length - 1] : 0;
-        const curA = accelerationsRef.current.length > 0 ? accelerationsRef.current[accelerationsRef.current.length - 1] : 0;
-        setStatus(`● Tracking Active\nDisplacement: ${disp.toFixed(2)} cm\nVelocity: ${curV.toFixed(2)} cm/s\nAcceleration: ${curA.toFixed(2)} cm/s²\nDuration: ${elapsed.toFixed(2)} s`);
+        setStatus(`● Tracking Active\nDisplacement: ${disp.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm' : 'px'}\nVelocity: ${curV.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm/s' : 'px/s'}\nAcceleration: ${curA.toFixed(2)} ${pixelsPerCmRef.current > 0 ? 'cm/s²' : 'px/s²'}\nDuration: ${elapsed.toFixed(2)} s`);
       }
     } else {
       if (!selectedRef.current) {
