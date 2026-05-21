@@ -1,11 +1,12 @@
 import { motion } from 'framer-motion';
-import { Home, BarChart3, ArrowRight, ArrowDown, Crosshair, Rocket } from 'lucide-react';
+import { Home, BarChart3, ArrowRight, ArrowDown, Crosshair, Rocket, BookOpen } from 'lucide-react';
 
-export type TabId = 'home' | 'graphs' | 'horizontal' | 'vertical' | 'projectile' | 'tracker';
+export type TabId = 'home' | 'graphs' | 'derivation' | 'horizontal' | 'vertical' | 'projectile' | 'tracker';
 
 const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
   { id: 'home', label: 'Home', icon: <Home size={16} /> },
   { id: 'graphs', label: 'Motion Graphs', icon: <BarChart3 size={16} /> },
+  { id: 'derivation', label: 'Derivation', icon: <BookOpen size={16} /> },
   { id: 'horizontal', label: 'Horizontal', icon: <ArrowRight size={16} /> },
   { id: 'vertical', label: 'Vertical', icon: <ArrowDown size={16} /> },
   { id: 'projectile', label: 'Projectile', icon: <Rocket size={16} /> },

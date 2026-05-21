@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { motion } from 'framer-motion';
+import VectorAddition from './VectorAddition';
 
 export default function MotionGraphsExplorer() {
   const [vi, setVi] = useState(5);
@@ -25,6 +26,7 @@ export default function MotionGraphsExplorer() {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+      <VectorAddition />
       <div className="kinema-section">
         <h2 className="text-2xl font-bold mb-2">Motion Graphs Explorer</h2>
         <p className="text-muted-foreground text-sm mb-6">
