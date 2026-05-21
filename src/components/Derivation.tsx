@@ -4,14 +4,14 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
   return (
     <div className="flex gap-4 items-start">
       <span className="shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full bg-primary text-primary-foreground font-bold">{n}</span>
-      <div className="flex-1 text-lg leading-relaxed">{children}</div>
+      <div className="flex-1 text-base leading-relaxed">{children}</div>
     </div>
   );
 }
 
 function Formula({ children, big = false }: { children: React.ReactNode; big?: boolean }) {
   return (
-    <div className={`font-mono ${big ? 'text-3xl md:text-4xl' : 'text-xl md:text-2xl'} bg-primary/10 border-l-4 border-primary px-5 py-4 rounded-r-lg my-3 inline-block`}>
+    <div className={`font-mono ${big ? 'text-2xl md:text-3xl' : 'text-lg md:text-xl'} bg-primary/10 border-l-4 border-primary px-5 py-4 rounded-r-lg my-3 inline-block`}>
       {children}
     </div>
   );
@@ -50,8 +50,8 @@ export default function Derivation() {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-10">
       <header className="kinema-section">
-        <h1 className="text-4xl md:text-5xl font-bold mb-3">Deriving the Four Kinematic Equations</h1>
-        <p className="text-lg md:text-xl text-muted-foreground max-w-3xl">
+        <h1 className="text-3xl md:text-4xl font-bold mb-3">Deriving the Four Kinematic Equations</h1>
+        <p className="text-base md:text-lg text-muted-foreground max-w-3xl">
           These four equations describe motion with <Hl>constant acceleration</Hl>. Let's see exactly where each one comes from — no magic, just algebra and a v–t graph.
         </p>
         <div className="mt-5 flex flex-wrap gap-2 text-sm">
@@ -64,8 +64,8 @@ export default function Derivation() {
 
       {/* Eq 1 */}
       <section id="eq1" className="kinema-section">
-        <h2 className="text-3xl md:text-4xl font-bold mb-2">1. v = v₀ + at</h2>
-        <p className="text-lg text-muted-foreground mb-4">"How fast am I going after some time t, if I started at v₀ and accelerated steadily?"</p>
+        <h2 className="text-2xl md:text-3xl font-bold mb-2">1. v = v₀ + at</h2>
+        <p className="text-base md:text-lg text-muted-foreground mb-4">"How fast am I going after some time t, if I started at v₀ and accelerated steadily?"</p>
         <div className="space-y-5">
           <Step n={1}>Start from the <Hl>definition of acceleration</Hl>: average acceleration is the change in velocity divided by the change in time.<Formula>a = (v − v₀) / (t − 0)</Formula></Step>
           <Step n={2}><Hl>Multiply both sides by t</Hl> to clear the denominator.<Formula>a · t = v − v₀</Formula></Step>
@@ -78,11 +78,11 @@ export default function Derivation() {
 
       {/* Eq 2 */}
       <section id="eq2" className="kinema-section">
-        <h2 className="text-3xl md:text-4xl font-bold mb-2">2. x = v₀t + ½at²</h2>
-        <p className="text-lg text-muted-foreground mb-4">"How far have I traveled in time t?" — derived from the area under a v–t graph.</p>
+        <h2 className="text-2xl md:text-3xl font-bold mb-2">2. x = v₀t + ½at²</h2>
+        <p className="text-base md:text-lg text-muted-foreground mb-4">"How far have I traveled in time t?" — derived from the area under a v–t graph.</p>
         <div className="grid md:grid-cols-2 gap-6 items-center">
           <VTGraph kind="trapezoid" />
-          <p className="text-lg">On a v–t graph with constant acceleration, velocity is a straight line. The area under the line equals displacement. That area is a <Hl>trapezoid</Hl>, which we split into a rectangle (v₀·t) and a triangle (½·t·(v−v₀)).</p>
+          <p className="text-base md:text-lg">On a v–t graph with constant acceleration, velocity is a straight line. The area under the line equals displacement. That area is a <Hl>trapezoid</Hl>, which we split into a rectangle (v₀·t) and a triangle (½·t·(v−v₀)).</p>
         </div>
         <div className="space-y-5 mt-6">
           <Step n={1}>Displacement = area under v–t graph = rectangle + triangle.<Formula>x = v₀·t + ½ · t · (v − v₀)</Formula></Step>
@@ -93,8 +93,8 @@ export default function Derivation() {
 
       {/* Eq 3 */}
       <section id="eq3" className="kinema-section">
-        <h2 className="text-3xl md:text-4xl font-bold mb-2">3. v² = v₀² + 2a·Δx</h2>
-        <p className="text-lg text-muted-foreground mb-4">"What's my speed after traveling some distance?" — the time-free equation.</p>
+        <h2 className="text-2xl md:text-3xl font-bold mb-2">3. v² = v₀² + 2a·Δx</h2>
+        <p className="text-base md:text-lg text-muted-foreground mb-4">"What's my speed after traveling some distance?" — the time-free equation.</p>
         <div className="space-y-5">
           <Step n={1}>From equation 1, solve for t.<Formula>t = (v − v₀) / a</Formula></Step>
           <Step n={2}>From equation 2: <Formula>Δx = v₀·t + ½·a·t²</Formula></Step>
@@ -110,11 +110,11 @@ export default function Derivation() {
 
       {/* Eq 4 */}
       <section id="eq4" className="kinema-section">
-        <h2 className="text-3xl md:text-4xl font-bold mb-2">4. x = ½(v₀ + v)·t</h2>
-        <p className="text-lg text-muted-foreground mb-4">"Use the average velocity when acceleration is constant."</p>
+        <h2 className="text-2xl md:text-3xl font-bold mb-2">4. x = ½(v₀ + v)·t</h2>
+        <p className="text-base md:text-lg text-muted-foreground mb-4">"Use the average velocity when acceleration is constant."</p>
         <div className="grid md:grid-cols-2 gap-6 items-center">
           <VTGraph kind="trapezoid" />
-          <p className="text-lg">When acceleration is constant, the <Hl>average velocity</Hl> is just the average of the starting and ending velocity. Distance = average velocity × time.</p>
+          <p className="text-base md:text-lg">When acceleration is constant, the <Hl>average velocity</Hl> is just the average of the starting and ending velocity. Distance = average velocity × time.</p>
         </div>
         <div className="space-y-5 mt-6">
           <Step n={1}>Average velocity for constant acceleration:<Formula>v̄ = (v₀ + v) / 2</Formula></Step>
@@ -127,12 +127,12 @@ export default function Derivation() {
       </section>
 
       <section className="kinema-section">
-        <h2 className="text-2xl font-bold mb-3">All four together</h2>
-        <div className="grid sm:grid-cols-2 gap-3 text-lg font-mono">
-          <div className="formula-block !text-xl">v = v₀ + a·t</div>
-          <div className="formula-block !text-xl">x = v₀·t + ½·a·t²</div>
-          <div className="formula-block !text-xl">v² = v₀² + 2a·Δx</div>
-          <div className="formula-block !text-xl">x = ½(v₀ + v)·t</div>
+        <h2 className="text-xl font-bold mb-3">All four together</h2>
+        <div className="grid sm:grid-cols-2 gap-3 text-base font-mono">
+          <div className="formula-block !text-lg">v = v₀ + a·t</div>
+          <div className="formula-block !text-lg">x = v₀·t + ½·a·t²</div>
+          <div className="formula-block !text-lg">v² = v₀² + 2a·Δx</div>
+          <div className="formula-block !text-lg">x = ½(v₀ + v)·t</div>
         </div>
         <p className="text-base text-muted-foreground mt-4">Each equation is missing one variable — pick whichever leaves out the quantity you <Hl>don't have and don't need</Hl>.</p>
       </section>
